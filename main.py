@@ -304,7 +304,27 @@ async def handle_media_stream(websocket: WebSocket):
             openai_ws = openai_ws_conn
             print("Connected to OpenAI WebSocket")
             await send_session_update(openai_ws, system_prompt_to_use)
-            # stream_sid is already set from the start event # Correctly commented out
+            
+            # === Send Initial Silence Packet to Twilio ===
+            try:
+                silence_chunk_size = 160 # 20ms of 8kHz 8-bit audio
+                silence_bytes = bytes([0xFF] * silence_chunk_size)
+                silence_payload = base64.b64encode(silence_bytes).decode('utf-8')
+                silence_media_event = {
+                    "event": "media",
+                    "streamSid": stream_sid,
+                    "media": {"payload": silence_payload}
+                }
+                if websocket.client_state == websockets.protocol.State.OPEN:
+                    print("Sending initial silence packet to Twilio...")
+                    await websocket.send_json(silence_media_event)
+                else:
+                    print("Twilio WebSocket closed before initial silence could be sent.")
+            except Exception as silence_err:
+                print(f"Error sending initial silence packet: {silence_err}")
+            # === End Send Initial Silence ===
+                
+            # stream_sid is already set from the start event
 
             async def receive_from_twilio():
                 try:
