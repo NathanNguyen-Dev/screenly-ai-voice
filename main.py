@@ -215,22 +215,38 @@ async def handle_media_stream(websocket: WebSocket):
     try:
         # === Initial Message Handling Loop ===
         # Wait max ~2 seconds for the start event
-        timeout_task = asyncio.sleep(2) 
+        timeout_task = asyncio.create_task(asyncio.sleep(2), name="TimeoutTask")
         receive_task = None
 
         for _ in range(5): # Try reading a few times quickly
-            receive_task = asyncio.create_task(websocket.receive_text())
+            receive_task = asyncio.create_task(websocket.receive_text(), name="ReceiveTask")
             done, pending = await asyncio.wait([receive_task, timeout_task], return_when=asyncio.FIRST_COMPLETED)
             
             if timeout_task in done:
                 print("ERROR: Timeout waiting for 'start' event from Twilio.")
-                if receive_task in pending: receive_task.cancel()
+                if receive_task in pending: 
+                    print("Cancelling receive task due to timeout...")
+                    receive_task.cancel()
+                    try:
+                        await receive_task
+                    except asyncio.CancelledError:
+                        print("Receive task successfully cancelled.")
                 await websocket.close(code=1002, reason="Timeout waiting for start event")
                 return
             
-            # If receive_task completed
-            message = await receive_task
-            print(f"Received initial message: {message[:100]}...") # Log received message
+            try:
+                message = await receive_task 
+            except WebSocketDisconnect as e:
+                print(f"WebSocket disconnected during initial message read: {e}")
+                if timeout_task in pending: timeout_task.cancel()
+                return
+            except Exception as e:
+                 print(f"Error receiving initial message: {e}")
+                 if timeout_task in pending: timeout_task.cancel()
+                 await websocket.close(code=1011, reason="Error receiving initial message")
+                 return
+
+            print(f"Received initial message: {message[:100]}...")
             
             try:
                 data = json.loads(message)
@@ -239,14 +255,17 @@ async def handle_media_stream(websocket: WebSocket):
                     call_sid = data['start']['callSid']
                     print(f"'start' event received. Stream SID: {stream_sid}, Call SID: {call_sid}")
                     start_event_received = True
-                    break # Exit loop once start is received
+                    if timeout_task in pending: timeout_task.cancel()
+                    break
                 else:
                     print(f"WARNING: Received non-start JSON event before start: {data.get('event')}")
             except json.JSONDecodeError:
                  print(f"WARNING: Received non-JSON message before start: {message[:100]}...")
             
-            # Small delay before trying again if unexpected message received
             await asyncio.sleep(0.1) 
+
+        if timeout_task in pending:
+            timeout_task.cancel()
 
         if not start_event_received:
             print("ERROR: Did not receive valid 'start' event from Twilio after initial connection.")
@@ -284,14 +303,13 @@ async def handle_media_stream(websocket: WebSocket):
         ]
 
         async with websockets.connect(url, extra_headers=headers) as openai_ws_conn:
-            openai_ws = openai_ws_conn # Assign to outer scope variable
+            openai_ws = openai_ws_conn
             print("Connected to OpenAI WebSocket")
-            await send_session_update(openai_ws, system_prompt_to_use) # Pass the dynamic prompt
-            # stream_sid is already set from the start event
+            await send_session_update(openai_ws, system_prompt_to_use)
+            # stream_sid is already set from the start event # Correctly commented out
 
             async def receive_from_twilio():
                 try:
-                    # Listen for media/stop (start already processed)
                     async for message in websocket.iter_text():
                         data = json.loads(message)
                         print(f"Twilio event: {data['event']}")
@@ -308,16 +326,15 @@ async def handle_media_stream(websocket: WebSocket):
                             if openai_ws and openai_ws.open:
                                 print("Closing OpenAI WebSocket gracefully.")
                                 await openai_ws.close()
-                            break # Exit receive loop on stop
+                            break
 
                 except WebSocketDisconnect:
                     print("Twilio WebSocket disconnected unexpectedly.")
                     if openai_ws and openai_ws.open:
                         print("Closing OpenAI WebSocket due to Twilio disconnect.")
                         await openai_ws.close()
-                except Exception as e: # Catch other errors during receive
+                except Exception as e:
                      print(f"Error in receive_from_twilio: {e}")
-                     # Consider closing connections
                      if openai_ws and openai_ws.open:
                          try: await openai_ws.close()
                          except: pass
@@ -358,7 +375,6 @@ async def handle_media_stream(websocket: WebSocket):
                     if websocket.client_state == websockets.protocol.State.OPEN:
                         await websocket.close()
 
-            # Run receiver and sender concurrently
             await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
     except websockets.exceptions.InvalidHandshake as e:
@@ -383,7 +399,7 @@ async def handle_media_stream(websocket: WebSocket):
             except: pass
 
 
-async def send_session_update(openai_ws, system_prompt: str): # Accept prompt argument
+async def send_session_update(openai_ws, system_prompt: str):
     session_update = {
         "type": "session.update",
         "session": {
@@ -391,7 +407,7 @@ async def send_session_update(openai_ws, system_prompt: str): # Accept prompt ar
             "input_audio_format": "g711_ulaw",
             "output_audio_format": "g711_ulaw",
             "voice": VOICE,
-            "instructions": system_prompt, # Use the dynamic prompt
+            "instructions": system_prompt,
             "modalities": ["text", "audio"],
             "temperature": 0.7,
         }
