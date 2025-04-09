@@ -29,6 +29,16 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 PUBLIC_SERVER_URL = os.getenv('PUBLIC_SERVER_URL')
 PORT = int(os.getenv('PORT', 8080))
+SYSTEM_MESSAGE = (
+    "Hey Ethan, I'm your AI interviewer—great to connect with you! "
+    "Before we dive into internship details, how's your day been so far? Feel free to take a moment to gather your thoughts. "
+    "Here's our plan: "
+    "First, tell me your story—what inspired you to pursue this field and get into this role? "
+    "Next, share the skills and experiences you bring to our team. Take your time. "
+    "Finally, let's talk about what excites you most about this internship opportunity. "
+    "I'll follow up on your answers, ensuring we stay focused on the internship. If you stray off-topic, I'll prompt you with, 'Nice, how does that relate to the internship?' "
+    "Remember to speak slowly and clearly—I'm here to make this a comfortable and engaging conversation. Let's get started!"
+)
 VOICE = 'coral'
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
@@ -63,26 +73,12 @@ if not OPENAI_API_KEY:
 if not PUBLIC_SERVER_URL:
     raise ValueError('MISSING PUBLIC_SERVER_URL environment variable!')
 
+# Define DEFAULT_SYSTEM_PROMPT using the original SYSTEM_MESSAGE
+DEFAULT_SYSTEM_PROMPT = SYSTEM_MESSAGE
+
 # --- Pydantic Models ---
 class MakeCallRequest(BaseModel):
     candidate_id: uuid.UUID = Field(..., description="The UUID of the candidate to call")
-
-# --- Helper Function for Prompt ---
-def create_dynamic_prompt(candidate_name: str, job_title: str, job_questions: list[str]) -> str:
-    # Simplified Prompt for Testing
-    prompt = f"Hello {candidate_name or 'there'}. This is an automated screening call for the {job_title} position. "
-    
-    # Ask the first listed question directly, or a default if none exist.
-    if job_questions:
-        first_question = job_questions[0]
-        prompt += f"My first question is: {first_question}"
-    else:
-        # Fallback question if no job-specific questions were found
-        prompt += "To start, please tell me briefly about your relevant experience for this role."
-        
-    # Add a reminder about guiding the conversation (optional but potentially helpful)
-    # prompt += " I will ask follow-up questions. If we go off-topic, I may steer us back."
-    return prompt
 
 # --- API Endpoints ---
 
@@ -104,62 +100,63 @@ async def handle_incoming_call(request: Request):
 
 # Handles the outbound call based on candidate_id
 @app.post("/make-call")
-async def make_outbound_call(call_request: MakeCallRequest):
+async def make_outbound_call(call_request: MakeCallRequest): # Accept request body
     candidate_id = call_request.candidate_id
     print(f"Attempting to make call to candidate_id: {candidate_id}")
     try:
-        # === Step 1: Fetch Candidate, Job, and Questions Data ===
-        # Fetch candidate name, phone, and associated job_id
-        candidate_response = supabase.table("candidates")\
-            .select("id, full_name, phone_number, job_id")\
-            .eq("id", str(candidate_id))\
-            .limit(1)\
+        # Step 1: Retrieve candidate, including name and job_id
+        candidate_response = (
+            supabase.table("candidates")
+            .select("id, phone_number, name, job_id") # Added name, job_id
+            .eq("id", str(candidate_id))
+            .limit(1)
+            .maybe_single() # Use maybe_single for cleaner handling
             .execute()
+        )
 
-        candidate = candidate_response.data[0] if candidate_response.data else None
+        candidate = candidate_response.data
         if not candidate:
             print(f"Candidate with ID {candidate_id} not found.")
-            return JSONResponse({"error": f"Candidate {candidate_id} not found"}, status_code=404)
+            return JSONResponse({"error": f"Candidate with ID {candidate_id} not found"}, status_code=404)
 
         phone_number = candidate.get("phone_number")
+        candidate_name = candidate.get("name", "Candidate") # Default if name is missing
         job_id = candidate.get("job_id")
-        candidate_name = candidate.get("full_name", "Candidate") # Use name or default
 
         if not phone_number:
             print(f"Candidate {candidate_id} has no phone number.")
-            return JSONResponse({"error": f"Candidate {candidate_id} no phone"}, status_code=400)
-        if not job_id:
-             print(f"Candidate {candidate_id} is not associated with a job.")
-             return JSONResponse({"error": f"Candidate {candidate_id} has no job"}, status_code=400)
+            return JSONResponse({"error": f"Candidate {candidate_id} has no phone number"}, status_code=400)
 
-        # Fetch job title
-        job_response = supabase.table("jobs")\
-            .select("title")\
-            .eq("id", str(job_id))\
-            .limit(1)\
-            .execute()
-        
-        job = job_response.data[0] if job_response.data else None
-        if not job:
-             print(f"Job with ID {job_id} not found for candidate {candidate_id}.")
-             return JSONResponse({"error": f"Job {job_id} not found"}, status_code=404)
-        job_title = job.get("title", "position") # Use title or default
+        # Step 1b: Retrieve job title
+        job_title = "the role" # Default if job_id is missing or job not found
+        if job_id:
+            job_response = (
+                supabase.table("jobs")
+                .select("title")
+                .eq("id", str(job_id))
+                .limit(1)
+                .maybe_single()
+                .execute()
+            )
+            if job_response.data and job_response.data.get("title"):
+                job_title = job_response.data["title"]
+            else:
+                print(f"WARN: Job with ID {job_id} not found for candidate {candidate_id}.")
 
-        # Fetch job questions
-        questions_response = supabase.table("job_questions")\
-            .select("question_text")\
-            .eq("job_id", str(job_id))\
-            .order("created_at")\
-            .execute()
-        
-        job_questions = [q['question_text'] for q in questions_response.data] if questions_response.data else []
-        print(f"Found {len(job_questions)} questions for job {job_id}.")
+        # Step 2: Generate the custom system prompt
+        custom_system_prompt = (
+            f"Hey {candidate_name}, I'm your AI interviewer—great to connect with you about the {job_title} position! "
+            "Before we dive into the details, how's your day been so far? Feel free to take a moment to gather your thoughts. "
+            "Here's our plan: "
+            "First, tell me your story—what inspired you to pursue this field and apply for this role? "
+            "Next, share the skills and experiences you bring that are relevant to the {job_title} position. Take your time. "
+            "Finally, let's talk about what excites you most about this specific opportunity. "
+            "I'll follow up on your answers, ensuring we stay focused on the internship. If you stray off-topic, I'll prompt you with, 'Nice, how does that relate to the {job_title} role?' "
+            f"Remember to speak slowly and clearly—I'm here to make this a comfortable and engaging conversation. Let's get started!"
+        )
+        print(f"Generated custom prompt for call with {candidate_name} for job {job_title}")
 
-        # === Step 2: Construct Dynamic Prompt ===
-        dynamic_system_prompt = create_dynamic_prompt(candidate_name, job_title, job_questions)
-        print(f"Generated Prompt:\n{dynamic_system_prompt}") # Log generated prompt for debugging
-
-        # === Step 3: Initiate Twilio Call ===
+        # Step 3: Use Twilio to initiate the call
         twilio_callback_url = f"{PUBLIC_SERVER_URL}/incoming-call"
         print(f"Setting Twilio callback URL to: {twilio_callback_url}")
         call = client.calls.create(
@@ -167,26 +164,24 @@ async def make_outbound_call(call_request: MakeCallRequest):
             from_=TWILIO_PHONE_NUMBER,
             url=twilio_callback_url
         )
-        call_sid = call.sid # Get the Call SID from Twilio
-        print(f"Twilio call initiated with SID: {call_sid}")
+        call_sid = call.sid # Get the call SID immediately
 
-        # === Step 4: Log Call with SID and Prompt ===
-        log_entry = {
-            "id": str(uuid.uuid4()),
+        # Step 4: Log the call, including the custom system prompt and call_sid
+        insert_response = supabase.table("call_logs").insert({
+            "id": str(uuid.uuid4()), # Generate new UUID for call_log
+            "call_sid": call_sid,    # Store the Twilio Call SID
             "candidate_id": str(candidate_id),
-            "status": "pending",
+            "status": "initiated",
             "started_at": datetime.now().isoformat(),
-            "call_sid": call_sid, # Store the Twilio Call SID
-            "system_prompt": dynamic_system_prompt # Store the generated prompt
-        }
-        insert_response = supabase.table("call_logs").insert(log_entry).execute()
-        
-        # Optional: Check insert_response for errors if needed
-        # if insert_response.error:
-        #    print(f"Error logging call: {insert_response.error}")
-        #    # Decide how to handle logging failure - proceed with call anyway?
+            "system_prompt": custom_system_prompt # Store the generated prompt
+        }).execute()
 
-        # === Step 5: Return Response ===
+        # Error checking for insert
+        if hasattr(insert_response, 'error') and insert_response.error:
+             print(f"ERROR inserting call log: {insert_response.error}")
+             # Optional: proceed with call but log error, or return error
+
+        # Step 5: Return JSON response
         return JSONResponse({
             "status": "calling",
             "candidate_id": str(candidate_id),
@@ -194,234 +189,202 @@ async def make_outbound_call(call_request: MakeCallRequest):
         })
 
     except Exception as e:
-        print(f"Error during make_outbound_call for candidate {candidate_id}: {e}")
-        return JSONResponse({"error": str(e)}, status_code=500)
+        import traceback
+        print(f"Error during make_outbound_call for candidate {candidate_id}:")
+        traceback.print_exc()
+        return JSONResponse({"error": f"An internal error occurred: {e}"}, status_code=500)
 
 
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
     print("Client connected")
     await websocket.accept()
-    print(f"WebSocket accepted: {websocket.client_state}")
 
-    openai_ws = None
-    system_prompt_to_use = None
+    # Variables accessible by nested functions
+    openai_ws_global = None
     call_sid = None
     stream_sid = None
-    start_event_received = False
+
+    url = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01'
+    headers = [
+        ("Authorization", f"Bearer {OPENAI_API_KEY}"),
+        ("OpenAI-Beta", "realtime=v1")
+    ]
 
     try:
-        # === Initial Message Handling Loop ===
-        # Wait max ~2 seconds for the start event
-        timeout_task = asyncio.create_task(asyncio.sleep(2), name="TimeoutTask")
-        receive_task = None
-
-        for _ in range(5): # Try reading a few times quickly
-            receive_task = asyncio.create_task(websocket.receive_text(), name="ReceiveTask")
-            done, pending = await asyncio.wait([receive_task, timeout_task], return_when=asyncio.FIRST_COMPLETED)
-            
-            if timeout_task in done:
-                print("ERROR: Timeout waiting for 'start' event from Twilio.")
-                if receive_task in pending: 
-                    print("Cancelling receive task due to timeout...")
-                    receive_task.cancel()
-                    try:
-                        await receive_task
-                    except asyncio.CancelledError:
-                        print("Receive task successfully cancelled.")
-                await websocket.close(code=1002, reason="Timeout waiting for start event")
-                return
-            
-            try:
-                message = await receive_task 
-            except WebSocketDisconnect as e:
-                print(f"WebSocket disconnected during initial message read: {e}")
-                if timeout_task in pending: timeout_task.cancel()
-                return
-            except Exception as e:
-                 print(f"Error receiving initial message: {e}")
-                 if timeout_task in pending: timeout_task.cancel()
-                 await websocket.close(code=1011, reason="Error receiving initial message")
-                 return
-
-            print(f"Received initial message: {message[:100]}...")
-            
-            try:
-                data = json.loads(message)
-                if data.get('event') == 'start':
-                    stream_sid = data['start']['streamSid']
-                    call_sid = data['start']['callSid']
-                    print(f"'start' event received. Stream SID: {stream_sid}, Call SID: {call_sid}")
-                    start_event_received = True
-                    if timeout_task in pending: timeout_task.cancel()
-                    break
-                else:
-                    print(f"WARNING: Received non-start JSON event before start: {data.get('event')}")
-            except json.JSONDecodeError:
-                 print(f"WARNING: Received non-JSON message before start: {message[:100]}...")
-            
-            await asyncio.sleep(0.1) 
-
-        if timeout_task in pending:
-            timeout_task.cancel()
-
-        if not start_event_received:
-            print("ERROR: Did not receive valid 'start' event from Twilio after initial connection.")
-            await websocket.close(code=1002, reason="Start event not received")
-            return
-        # === End Initial Message Handling ===
-
-        # --- Fetch System Prompt using Call SID (moved after start event received) ---
-        try:
-            response = supabase.table("call_logs")\
-                .select("system_prompt")\
-                .eq("call_sid", call_sid)\
-                .limit(1)\
-                .maybe_single()\
-                .execute()
-            
-            if response.data and response.data.get('system_prompt'):
-                system_prompt_to_use = response.data['system_prompt']
-                print(f"Found system prompt for Call SID {call_sid}")
-            else:
-                print(f"ERROR: System prompt not found for Call SID {call_sid}. Cannot proceed.")
-                raise ValueError(f"System prompt not found for Call SID {call_sid}")
-                
-        except Exception as db_exc:
-            print(f"ERROR fetching system prompt for Call SID {call_sid}: {db_exc}")
-            await websocket.close(code=1011, reason="Database error fetching prompt")
-            return
-        # --- End Fetch System Prompt ---
-
-        # Now connect to OpenAI with the fetched prompt
-        url = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01'
-        headers = [
-            ("Authorization", f"Bearer {OPENAI_API_KEY}"),
-            ("OpenAI-Beta", "realtime=v1")
-        ]
-
-        async with websockets.connect(url, extra_headers=headers) as openai_ws_conn:
-            openai_ws = openai_ws_conn
+        async with websockets.connect(url, extra_headers=headers) as openai_ws:
+            openai_ws_global = openai_ws
             print("Connected to OpenAI WebSocket")
-            await send_session_update(openai_ws, system_prompt_to_use)
-            
-            # === Send Initial Silence Packet to Twilio ===
-            try:
-                silence_chunk_size = 160 # 20ms of 8kHz 8-bit audio
-                silence_bytes = bytes([0xFF] * silence_chunk_size)
-                silence_payload = base64.b64encode(silence_bytes).decode('utf-8')
-                silence_media_event = {
-                    "event": "media",
-                    "streamSid": stream_sid,
-                    "media": {"payload": silence_payload}
-                }
-                if websocket.client_state == websockets.protocol.State.OPEN:
-                    print("Sending initial silence packet to Twilio...")
-                    await websocket.send_json(silence_media_event)
-                else:
-                    print("Twilio WebSocket closed before initial silence could be sent.")
-            except Exception as silence_err:
-                print(f"Error sending initial silence packet: {silence_err}")
-            # === End Send Initial Silence ===
-                
-            # stream_sid is already set from the start event
+            # Session update is now sent inside receive_from_twilio after 'start'
 
             async def receive_from_twilio():
+                nonlocal stream_sid, call_sid # Allow modification
+                session_update_sent = False # Flag to send session update only once
                 try:
                     async for message in websocket.iter_text():
-                        data = json.loads(message)
-                        print(f"Twilio event: {data['event']}")
-                        if data['event'] == 'media' and openai_ws and openai_ws.open:
-                            print(
-                                f"Sending audio to OpenAI: {len(data['media']['payload'])} bytes")
-                            audio_append = {
-                                "type": "input_audio_buffer.append",
-                                "audio": data['media']['payload']
-                            }
-                            await openai_ws.send(json.dumps(audio_append))
-                        elif data['event'] == 'stop':
-                            print(f"Twilio stream stopped for Call SID {call_sid}")
-                            if openai_ws and openai_ws.open:
-                                print("Closing OpenAI WebSocket gracefully.")
-                                await openai_ws.close()
+                        if not openai_ws.open:
+                            print("OpenAI WS closed, stopping receive loop.")
                             break
+                        try:
+                            data = json.loads(message)
+                            event = data.get('event')
 
-                except WebSocketDisconnect:
-                    print("Twilio WebSocket disconnected unexpectedly.")
-                    if openai_ws and openai_ws.open:
-                        print("Closing OpenAI WebSocket due to Twilio disconnect.")
-                        await openai_ws.close()
+                            if event == 'start':
+                                stream_sid_local = data.get('start', {}).get('streamSid')
+                                call_sid_local = data.get('start', {}).get('callSid')
+                                print(f"Incoming stream started: SID {stream_sid_local}, Call SID: {call_sid_local}")
+
+                                if not stream_sid_local or not call_sid_local:
+                                    err_msg = f"Missing {'streamSid' if not stream_sid_local else 'callSid'} in 'start' event."
+                                    print(f"ERROR: {err_msg}")
+                                    await websocket.close(code=1003, reason=err_msg)
+                                    break
+
+                                # Assign to outer scope variables
+                                stream_sid = stream_sid_local
+                                call_sid = call_sid_local
+
+                                # Fetch prompt and send session update ONCE
+                                if not session_update_sent and openai_ws.open:
+                                    fetched_prompt = await get_call_system_prompt(call_sid)
+                                    prompt_to_use = fetched_prompt or DEFAULT_SYSTEM_PROMPT # Use fetched or default
+                                    print(f"Determined prompt for call {call_sid}. Sending session update.")
+                                    await send_session_update(openai_ws, prompt_to_use)
+                                    session_update_sent = True
+                                elif not session_update_sent: # Log if WS closed before sending
+                                     print("WARN: Cannot send session update, OpenAI WS closed after start event processing.")
+
+
+                            elif event == 'media':
+                                if not session_update_sent:
+                                    print("WARN: Received media before session update sent (start not processed?). Discarding.")
+                                    continue
+
+                                payload = data.get('media', {}).get('payload')
+                                if payload and openai_ws.open:
+                                    audio_append = {
+                                        "type": "input_audio_buffer.append",
+                                        "audio": payload
+                                    }
+                                    await openai_ws.send(json.dumps(audio_append))
+                                elif not payload:
+                                    print("WARN: Received media event with no payload.")
+                                elif not openai_ws.open:
+                                     print("WARN: Cannot send media, OpenAI WS closed.")
+
+
+                            elif event == 'stop':
+                                print(f"Stop event received for call {call_sid}. Initiating close.")
+                                if openai_ws.open:
+                                    stop_message = {"type": "input_text.interrupt"}
+                                    try:
+                                        await openai_ws.send(json.dumps(stop_message))
+                                    except websockets.ConnectionClosed:
+                                        print("OpenAI WS already closed when sending stop interrupt.")
+                                break # Exit loop on stop
+
+                            elif event == 'mark':
+                                mark_name = data.get('mark', {}).get('name')
+                                print(f"Mark event received: {mark_name}")
+
+                        except json.JSONDecodeError as e:
+                            print(f"Error decoding JSON from Twilio: {e} - Message: {message[:100]}...")
+                        except websockets.ConnectionClosed as e:
+                            print(f"OpenAI WS Connection closed while processing Twilio message: {e}")
+                            break
+                        except Exception as e:
+                            import traceback
+                            print(f"Error processing Twilio message for call {call_sid}:")
+                            traceback.print_exc()
+
+                except WebSocketDisconnect as e:
+                    print(f"Twilio WebSocket disconnected: {e.code} {e.reason}")
+                except websockets.ConnectionClosed:
+                    print("OpenAI WebSocket closed during receive loop (while waiting on Twilio).")
                 except Exception as e:
-                     print(f"Error in receive_from_twilio: {e}")
-                     if openai_ws and openai_ws.open:
-                         try: await openai_ws.close()
-                         except: pass
-                     if websocket.client_state == websockets.protocol.State.OPEN:
-                         try: await websocket.close()
-                         except: pass 
+                    import traceback
+                    print(f"Unexpected error in receive_from_twilio main loop for call {call_sid}:")
+                    traceback.print_exc()
+                finally:
+                    print(f"Exiting receive_from_twilio loop for call {call_sid}.")
 
             async def send_to_twilio():
+                nonlocal stream_sid # Use stream_sid from outer scope
                 try:
                     async for openai_message in openai_ws:
-                        response = json.loads(openai_message)
-                        print(f"OpenAI event: {response['type']}")
-                        if response['type'] == 'session.updated':
-                            print("Session updated successfully:", response)
-                        elif response['type'] == 'response.audio.delta' and response.get('delta'):
-                            audio_payload = base64.b64encode(
-                                base64.b64decode(response['delta'])).decode('utf-8')
-                            audio_delta = {
-                                "event": "media",
-                                "streamSid": stream_sid,
-                                "media": {"payload": audio_payload}
-                            }
-                            if websocket.client_state == websockets.protocol.State.OPEN:
+                        if websocket.client_state != websockets.protocol.State.OPEN:
+                            print("Twilio WebSocket closed, stopping send loop.")
+                            break
+                        try:
+                            response = json.loads(openai_message)
+                            if response['type'] == 'session.updated':
+                                print("OpenAI Session updated successfully.") # Less verbose
+                            elif response['type'] == 'response.audio.delta' and response.get('delta'):
+                                if not stream_sid:
+                                    print("WARN: Received audio delta before stream_sid set. Discarding.")
+                                    continue
+
+                                audio_payload = base64.b64encode(
+                                    base64.b64decode(response['delta'])).decode('utf-8')
+                                audio_delta = {
+                                    "event": "media",
+                                    "streamSid": stream_sid, # Use the stream_sid
+                                    "media": {"payload": audio_payload}
+                                }
                                 await websocket.send_json(audio_delta)
-                            else:
-                                print("Twilio WebSocket closed, cannot send audio delta.")
-                        # Handle other OpenAI messages if needed 
-
-                except websockets.ConnectionClosed as e:
-                    print(f"OpenAI WebSocket closed: {e}")
-                    if websocket.client_state == websockets.protocol.State.OPEN:
-                        print("Closing Twilio WebSocket due to OpenAI closure.")
-                        await websocket.close()
+                        except json.JSONDecodeError:
+                             print(f"Error decoding JSON from OpenAI: {openai_message[:100]}...")
+                        except KeyError as e:
+                             print(f"Missing key in OpenAI message: {e}, data: {response}")
+                        except WebSocketDisconnect:
+                             print("Twilio WebSocket disconnected while trying to send.")
+                             break
+                        except Exception as e:
+                             print(f"Error processing OpenAI message or sending to Twilio: {e}")
+                except websockets.ConnectionClosedOK:
+                    print("OpenAI WebSocket closed normally.")
+                except websockets.ConnectionClosedError as e:
+                    print(f"OpenAI WebSocket closed with error: {e}")
                 except Exception as e:
-                    print(f"Error in send_to_twilio: {e}")
-                    if openai_ws and openai_ws.open:
-                        await openai_ws.close()
-                    if websocket.client_state == websockets.protocol.State.OPEN:
-                        await websocket.close()
+                    import traceback
+                    print(f"Unexpected error in send_to_twilio for call {call_sid}:")
+                    traceback.print_exc()
+                finally:
+                    print(f"Exiting send_to_twilio loop for call {call_sid}.")
 
+            # Run the tasks
+            print(f"Starting gather for receive/send tasks for call {call_sid}")
             await asyncio.gather(receive_from_twilio(), send_to_twilio())
+            print(f"Gather finished for receive/send tasks for call {call_sid}")
 
     except websockets.exceptions.InvalidHandshake as e:
-        print(f"Failed WebSocket handshake with OpenAI: {e}")
-        if websocket.client_state == websockets.protocol.State.OPEN:
-            await websocket.close(code=1011, reason="OpenAI handshake failed")
+         print(f"Failed OpenAI WebSocket handshake: {e}")
+    except WebSocketDisconnect as e:
+         print(f"Twilio WebSocket disconnected during setup or main handler: {e.code} {e.reason}")
+    except ConnectionRefusedError:
+        print("ERROR: Connection refused connecting to OpenAI.")
     except Exception as e:
-        print(f"Error in handle_media_stream: {e}")
-        if openai_ws and openai_ws.open:
-            try: await openai_ws.close() 
-            except: pass
-        if websocket.client_state == websockets.protocol.State.OPEN:
-            try: await websocket.close(code=1011, reason="Server error") 
-            except: pass
+        import traceback
+        print(f"An unexpected error occurred in handle_media_stream outer block:")
+        traceback.print_exc()
     finally:
-        print(f"Media stream handler finished for Call SID {call_sid}")
-        if openai_ws and openai_ws.open:
-            try: await openai_ws.close() 
-            except: pass
+        # Use the call_sid defined in the outer scope for logging
+        final_call_sid = call_sid if call_sid else 'N/A'
+        print(f"handle_media_stream finishing for call {final_call_sid}. Cleaning up...")
+        # Ensure both websockets are closed
+        if openai_ws_global and openai_ws_global.open:
+            print("Finally: Closing OpenAI WS")
+            try: await openai_ws_global.close()
+            except Exception as close_err: print(f"Error closing OpenAI WS in finally: {close_err}")
         if websocket.client_state == websockets.protocol.State.OPEN:
-            try: await websocket.close() 
-            except: pass
+             print("Finally: Closing Twilio WS")
+             try: await websocket.close(code=1000)
+             except Exception as close_err: print(f"Error closing Twilio WS in finally: {close_err}")
+        print(f"handle_media_stream finished execution for call {final_call_sid}.")
 
 
-async def send_session_update(openai_ws, system_prompt: str):
-    # --- Remove Temporary Test --- 
-    # test_prompt = "Hello. Please say: Testing one two three."
-    # print(f"--- DEBUG: USING HARDCODED TEST PROMPT: {test_prompt} ---")
-    
+# Modified send_session_update to accept prompt and check connection
+async def send_session_update(openai_ws, system_prompt: str): # Accept system_prompt
     session_update = {
         "type": "session.update",
         "session": {
@@ -429,13 +392,51 @@ async def send_session_update(openai_ws, system_prompt: str):
             "input_audio_format": "g711_ulaw",
             "output_audio_format": "g711_ulaw",
             "voice": VOICE,
-            "instructions": system_prompt, # Use the dynamic prompt again
+            "instructions": system_prompt, # Use the passed system_prompt
             "modalities": ["text", "audio"],
             "temperature": 0.7,
         }
     }
-    print('Sending session update with dynamic prompt...') # Restore original log message
-    await openai_ws.send(json.dumps(session_update))
+    print(f"Sending session update with prompt: '{system_prompt[:50]}...'")
+    if openai_ws and openai_ws.open:
+        try:
+            await openai_ws.send(json.dumps(session_update))
+            print("Session update sent successfully.")
+        except websockets.ConnectionClosed:
+            print("ERROR: Failed to send session update, OpenAI WebSocket closed.")
+        except Exception as e:
+            print(f"ERROR sending session update: {e}")
+    else:
+        print("ERROR: Cannot send session update, OpenAI WebSocket is not open.")
+
+
+# --- Helper Functions ---
+async def get_call_system_prompt(call_sid: str) -> str | None:
+    """Fetches the system prompt associated with a call_sid from Supabase."""
+    if not call_sid:
+        print("WARN: get_call_system_prompt called with no call_sid.")
+        return None
+    try:
+        print(f"Fetching system prompt for call_sid: {call_sid}")
+        # Using parentheses for implicit continuation
+        response = (
+            supabase.table("call_logs")
+            .select("system_prompt")
+            .eq("call_sid", call_sid)
+            .limit(1)
+            .maybe_single()
+            .execute()
+        )
+
+        if response.data and response.data.get('system_prompt'):
+            print(f"Found custom system prompt for call {call_sid}")
+            return response.data['system_prompt']
+        else:
+            print(f"No specific system prompt found for call {call_sid}. Will use default.")
+            return None
+    except Exception as e:
+        print(f"ERROR fetching system prompt for call {call_sid}: {e}")
+        return None # Return None on error, default will be used
 
 if __name__ == "__main__":
     import uvicorn
