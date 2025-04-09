@@ -134,7 +134,7 @@ async def make_outbound_call(call_request: MakeCallRequest): # Accept request bo
         supabase.table("call_logs").insert({
             "id": str(uuid.uuid4()),
             "candidate_id": str(candidate_id), # Use the provided ID
-            "status": "initiated",
+            "status": "pending",
             "started_at": datetime.now().isoformat() # Keep user change
         }).execute()
 
