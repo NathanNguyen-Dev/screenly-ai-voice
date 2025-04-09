@@ -69,22 +69,19 @@ class MakeCallRequest(BaseModel):
 
 # --- Helper Function for Prompt ---
 def create_dynamic_prompt(candidate_name: str, job_title: str, job_questions: list[str]) -> str:
-    prompt = f"Hey {candidate_name or 'there'}, I'm your AI interviewer for the {job_title} position—great to connect with you! "
-    prompt += "Before we dive into the specifics, how's your day been so far? Feel free to take a moment to gather your thoughts. "
-    prompt += "Here's our plan: "
-    prompt += "First, tell me your story—what inspired you to pursue this field and apply for this role? "
-    prompt += "Next, share the key skills and experiences you bring that align with the job description. "
+    # Simplified Prompt for Testing
+    prompt = f"Hello {candidate_name or 'there'}. This is an automated screening call for the {job_title} position. "
     
+    # Ask the first listed question directly, or a default if none exist.
     if job_questions:
-        prompt += "Then, I have a few specific questions related to the role: "
-        for i, q_text in enumerate(job_questions):
-            prompt += f"Question {i+1}: {q_text} "
+        first_question = job_questions[0]
+        prompt += f"My first question is: {first_question}"
     else:
-        prompt += "Then, we can discuss what excites you most about this opportunity. "
-
-    prompt += "I'll follow up on your answers, ensuring we stay focused on the position. If you stray off-topic, I'll gently guide us back by asking, 'Interesting, how does that connect back to the role or your experience?' "
-    prompt += "Remember to speak clearly—I'm here to make this a comfortable and engaging conversation. "
-    prompt += "Let's begin with your story: what inspired you to pursue this field and apply for this specific role?"
+        # Fallback question if no job-specific questions were found
+        prompt += "To start, please tell me briefly about your relevant experience for this role."
+        
+    # Add a reminder about guiding the conversation (optional but potentially helpful)
+    # prompt += " I will ask follow-up questions. If we go off-topic, I may steer us back."
     return prompt
 
 # --- API Endpoints ---
@@ -401,11 +398,9 @@ async def handle_media_stream(websocket: WebSocket):
 
 
 async def send_session_update(openai_ws, system_prompt: str):
-    # --- TEMPORARY TEST --- 
-    # Use a hardcoded, very simple prompt to check basic audio generation
-    test_prompt = "Hello. Please say: Testing one two three."
-    print(f"--- DEBUG: USING HARDCODED TEST PROMPT: {test_prompt} ---")
-    # --- END TEMPORARY TEST ---
+    # --- Remove Temporary Test --- 
+    # test_prompt = "Hello. Please say: Testing one two three."
+    # print(f"--- DEBUG: USING HARDCODED TEST PROMPT: {test_prompt} ---")
     
     session_update = {
         "type": "session.update",
@@ -414,14 +409,12 @@ async def send_session_update(openai_ws, system_prompt: str):
             "input_audio_format": "g711_ulaw",
             "output_audio_format": "g711_ulaw",
             "voice": VOICE,
-            # "instructions": system_prompt, # Temporarily commented out
-            "instructions": test_prompt, # Use the hardcoded test prompt
+            "instructions": system_prompt, # Use the dynamic prompt again
             "modalities": ["text", "audio"],
             "temperature": 0.7,
         }
     }
-    # print('Sending session update with dynamic prompt...') # Original log message
-    print(f'Sending session update with TEST prompt...') # Modified log message
+    print('Sending session update with dynamic prompt...') # Restore original log message
     await openai_ws.send(json.dumps(session_update))
 
 if __name__ == "__main__":
