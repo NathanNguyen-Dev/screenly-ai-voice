@@ -204,50 +204,77 @@ async def make_outbound_call(call_request: MakeCallRequest):
 async def handle_media_stream(websocket: WebSocket):
     print("Client connected")
     await websocket.accept()
+    print(f"WebSocket accepted: {websocket.client_state}")
 
-    openai_ws = None # Define openai_ws here to ensure it's accessible in finally block
-    system_prompt_to_use = None # Store fetched prompt
-    call_sid = None # Store call_sid
+    openai_ws = None
+    system_prompt_to_use = None
+    call_sid = None
+    stream_sid = None
+    start_event_received = False
 
     try:
-        # Need to get call_sid first from the 'start' event before connecting to OpenAI
-        # Wait for the start event from Twilio
-        start_message = await websocket.receive_text()
-        start_data = json.loads(start_message)
-        
-        if start_data.get('event') == 'start':
-            stream_sid = start_data['start']['streamSid']
-            call_sid = start_data['start']['callSid'] # Get the Call SID
-            print(f"Incoming stream started: {stream_sid}, Call SID: {call_sid}")
+        # === Initial Message Handling Loop ===
+        # Wait max ~2 seconds for the start event
+        timeout_task = asyncio.sleep(2) 
+        receive_task = None
+
+        for _ in range(5): # Try reading a few times quickly
+            receive_task = asyncio.create_task(websocket.receive_text())
+            done, pending = await asyncio.wait([receive_task, timeout_task], return_when=asyncio.FIRST_COMPLETED)
             
-            # --- Fetch System Prompt using Call SID ---
+            if timeout_task in done:
+                print("ERROR: Timeout waiting for 'start' event from Twilio.")
+                if receive_task in pending: receive_task.cancel()
+                await websocket.close(code=1002, reason="Timeout waiting for start event")
+                return
+            
+            # If receive_task completed
+            message = await receive_task
+            print(f"Received initial message: {message[:100]}...") # Log received message
+            
             try:
-                response = supabase.table("call_logs")\
-                    .select("system_prompt")\
-                    .eq("call_sid", call_sid)\
-                    .limit(1)\
-                    .maybe_single()\
-                    .execute()
-                
-                if response.data and response.data.get('system_prompt'):
-                    system_prompt_to_use = response.data['system_prompt']
-                    print(f"Found system prompt for Call SID {call_sid}")
+                data = json.loads(message)
+                if data.get('event') == 'start':
+                    stream_sid = data['start']['streamSid']
+                    call_sid = data['start']['callSid']
+                    print(f"'start' event received. Stream SID: {stream_sid}, Call SID: {call_sid}")
+                    start_event_received = True
+                    break # Exit loop once start is received
                 else:
-                    print(f"WARNING: System prompt not found for Call SID {call_sid}. Using default.")
-                    # Decide on fallback behavior: use default, raise error, etc.
-                    # system_prompt_to_use = SYSTEM_MESSAGE # Option: fallback to default
-                    raise ValueError(f"System prompt not found for Call SID {call_sid}") # Option: raise error
-                    
-            except Exception as db_exc:
-                print(f"ERROR fetching system prompt for Call SID {call_sid}: {db_exc}")
-                # Decide how to handle DB error - maybe disconnect?
-                await websocket.close(code=1011, reason="Database error fetching prompt")
-                return # Exit if we can't get the prompt
-            # --- End Fetch System Prompt ---
-        else:
-             print(f"ERROR: Expected 'start' event first, but received: {start_data.get('event')}")
-             await websocket.close(code=1002, reason="Protocol error: Expected start event")
-             return # Exit if protocol is wrong
+                    print(f"WARNING: Received non-start JSON event before start: {data.get('event')}")
+            except json.JSONDecodeError:
+                 print(f"WARNING: Received non-JSON message before start: {message[:100]}...")
+            
+            # Small delay before trying again if unexpected message received
+            await asyncio.sleep(0.1) 
+
+        if not start_event_received:
+            print("ERROR: Did not receive valid 'start' event from Twilio after initial connection.")
+            await websocket.close(code=1002, reason="Start event not received")
+            return
+        # === End Initial Message Handling ===
+
+        # --- Fetch System Prompt using Call SID (moved after start event received) ---
+        try:
+            response = supabase.table("call_logs")\
+                .select("system_prompt")\
+                .eq("call_sid", call_sid)\
+                .limit(1)\
+                .maybe_single()\
+                .execute()
+            
+            if response.data and response.data.get('system_prompt'):
+                system_prompt_to_use = response.data['system_prompt']
+                print(f"Found system prompt for Call SID {call_sid}")
+            else:
+                print(f"ERROR: System prompt not found for Call SID {call_sid}. Cannot proceed.")
+                raise ValueError(f"System prompt not found for Call SID {call_sid}")
+                
+        except Exception as db_exc:
+            print(f"ERROR fetching system prompt for Call SID {call_sid}: {db_exc}")
+            await websocket.close(code=1011, reason="Database error fetching prompt")
+            return
+        # --- End Fetch System Prompt ---
 
         # Now connect to OpenAI with the fetched prompt
         url = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01'
@@ -264,7 +291,7 @@ async def handle_media_stream(websocket: WebSocket):
 
             async def receive_from_twilio():
                 try:
-                    # We already processed the start message, now listen for media/stop
+                    # Listen for media/stop (start already processed)
                     async for message in websocket.iter_text():
                         data = json.loads(message)
                         print(f"Twilio event: {data['event']}")
@@ -285,10 +312,18 @@ async def handle_media_stream(websocket: WebSocket):
 
                 except WebSocketDisconnect:
                     print("Twilio WebSocket disconnected unexpectedly.")
-                    # Ensure OpenAI connection is closed if Twilio disconnects abruptly
                     if openai_ws and openai_ws.open:
                         print("Closing OpenAI WebSocket due to Twilio disconnect.")
                         await openai_ws.close()
+                except Exception as e: # Catch other errors during receive
+                     print(f"Error in receive_from_twilio: {e}")
+                     # Consider closing connections
+                     if openai_ws and openai_ws.open:
+                         try: await openai_ws.close()
+                         except: pass
+                     if websocket.client_state == websockets.protocol.State.OPEN:
+                         try: await websocket.close()
+                         except: pass 
 
             async def send_to_twilio():
                 try:
@@ -305,23 +340,19 @@ async def handle_media_stream(websocket: WebSocket):
                                 "streamSid": stream_sid,
                                 "media": {"payload": audio_payload}
                             }
-                            # Check if Twilio websocket is still open before sending
                             if websocket.client_state == websockets.protocol.State.OPEN:
                                 await websocket.send_json(audio_delta)
                             else:
                                 print("Twilio WebSocket closed, cannot send audio delta.")
-                                # Optionally break here if Twilio is gone
-                        # Handle other OpenAI messages if needed (e.g., transcription, errors)
+                        # Handle other OpenAI messages if needed 
 
                 except websockets.ConnectionClosed as e:
                     print(f"OpenAI WebSocket closed: {e}")
-                    # Ensure Twilio connection is closed if OpenAI closes
                     if websocket.client_state == websockets.protocol.State.OPEN:
                         print("Closing Twilio WebSocket due to OpenAI closure.")
                         await websocket.close()
                 except Exception as e:
                     print(f"Error in send_to_twilio: {e}")
-                    # Consider closing connections on error
                     if openai_ws and openai_ws.open:
                         await openai_ws.close()
                     if websocket.client_state == websockets.protocol.State.OPEN:
@@ -332,21 +363,18 @@ async def handle_media_stream(websocket: WebSocket):
 
     except websockets.exceptions.InvalidHandshake as e:
         print(f"Failed WebSocket handshake with OpenAI: {e}")
-        # Ensure Twilio connection is closed
         if websocket.client_state == websockets.protocol.State.OPEN:
             await websocket.close(code=1011, reason="OpenAI handshake failed")
     except Exception as e:
         print(f"Error in handle_media_stream: {e}")
-        # Ensure connections are closed on general errors
         if openai_ws and openai_ws.open:
             try: await openai_ws.close() 
-            except: pass # Ignore errors during cleanup
+            except: pass
         if websocket.client_state == websockets.protocol.State.OPEN:
             try: await websocket.close(code=1011, reason="Server error") 
-            except: pass # Ignore errors during cleanup
+            except: pass
     finally:
         print(f"Media stream handler finished for Call SID {call_sid}")
-        # Final check to ensure connections are closed 
         if openai_ws and openai_ws.open:
             try: await openai_ws.close() 
             except: pass
