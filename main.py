@@ -83,7 +83,8 @@ def create_dynamic_prompt(candidate_name: str, job_title: str, job_questions: li
         prompt += "Then, we can discuss what excites you most about this opportunity. "
 
     prompt += "I'll follow up on your answers, ensuring we stay focused on the position. If you stray off-topic, I'll gently guide us back by asking, 'Interesting, how does that connect back to the role or your experience?' "
-    prompt += "Remember to speak clearly—I'm here to make this a comfortable and engaging conversation. Let's get started!"
+    prompt += "Remember to speak clearly—I'm here to make this a comfortable and engaging conversation. "
+    prompt += "Let's begin with your story: what inspired you to pursue this field and apply for this specific role?"
     return prompt
 
 # --- API Endpoints ---
