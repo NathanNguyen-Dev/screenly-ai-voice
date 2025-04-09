@@ -401,6 +401,12 @@ async def handle_media_stream(websocket: WebSocket):
 
 
 async def send_session_update(openai_ws, system_prompt: str):
+    # --- TEMPORARY TEST --- 
+    # Use a hardcoded, very simple prompt to check basic audio generation
+    test_prompt = "Hello. Please say: Testing one two three."
+    print(f"--- DEBUG: USING HARDCODED TEST PROMPT: {test_prompt} ---")
+    # --- END TEMPORARY TEST ---
+    
     session_update = {
         "type": "session.update",
         "session": {
@@ -408,12 +414,14 @@ async def send_session_update(openai_ws, system_prompt: str):
             "input_audio_format": "g711_ulaw",
             "output_audio_format": "g711_ulaw",
             "voice": VOICE,
-            "instructions": system_prompt,
+            # "instructions": system_prompt, # Temporarily commented out
+            "instructions": test_prompt, # Use the hardcoded test prompt
             "modalities": ["text", "audio"],
             "temperature": 0.7,
         }
     }
-    print('Sending session update with dynamic prompt...')
+    # print('Sending session update with dynamic prompt...') # Original log message
+    print(f'Sending session update with TEST prompt...') # Modified log message
     await openai_ws.send(json.dumps(session_update))
 
 if __name__ == "__main__":
