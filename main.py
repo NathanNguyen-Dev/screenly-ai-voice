@@ -279,8 +279,11 @@ async def handle_twilio_stream(websocket: WebSocket):
                         initial_message = {
                             "type": "conversation.item.create",
                             "item": {
-                                "type": "assistant",
-                                "text": initial_greeting_text
+                                "type": "message",
+                                "message": {
+                                    "role": "assistant",
+                                    "text": initial_greeting_text
+                                }
                             }
                         }
                         logger.info(f"[{session_id}] Sending initial assistant greeting to OpenAI.")
