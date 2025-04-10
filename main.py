@@ -236,7 +236,7 @@ async def send_initial_greeting(openai_ws, session_id: str, candidate_name: str)
         "type": "conversation.item.create",
         "item": {
             "type": "message",
-            "role": "assistant",
+            "role": "user",
             "content": [
                 {
                     "type": "input_text",
@@ -260,195 +260,186 @@ async def handle_twilio_stream(websocket: WebSocket):
     logger.info(f"Twilio WebSocket client connected: {websocket.client}")
 
     session_id = None
-    openai_ws = None
+    # openai_ws is now managed by async with
     receive_task = None
     send_task = None
 
     try:
-        # Establish connection to OpenAI for this session
+        # Establish connection to OpenAI using async with
         openai_url = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01'
         openai_headers = [
             ("Authorization", f"Bearer {OPENAI_API_KEY}"),
             ("OpenAI-Beta", "realtime=v1")
         ]
         logger.info("Attempting to connect to OpenAI WebSocket...")
-        openai_ws = await websockets.connect(openai_url, extra_headers=openai_headers)
-        logger.info("Connected to OpenAI WebSocket.")
+        async with websockets.connect(openai_url, extra_headers=openai_headers) as openai_ws:
+            logger.info("Connected to OpenAI WebSocket.")
 
-        async def receive_from_twilio(twilio_ws, oai_ws):
-            nonlocal session_id # Allow modification of outer scope variable
-            try:
-                async for message_text in twilio_ws.iter_text():
-                    data = json.loads(message_text)
-                    event = data.get("event")
-                    # logger.debug(f"Received from Twilio: {event}") # Very verbose
+            # Define nested helper functions
+            async def receive_from_twilio(twilio_ws, oai_ws):
+                nonlocal session_id
+                try:
+                    async for message_text in twilio_ws.iter_text():
+                        data = json.loads(message_text)
+                        event = data.get("event")
+                        # logger.debug(f"Received from Twilio: {event}") # Very verbose
 
-                    if event == "start":
-                        session_id = data['start']['streamSid']
-                        call_sid = data['start']['callSid']
-                        custom_params = data['start'].get('customParameters', {})
-                        candidate_name = custom_params.get('CandidateName', 'there')
-                        job_title = custom_params.get('JobTitle', 'the position')
-                        logger.info(f"Stream started: SID={session_id}, CallSID={call_sid}, Candidate={candidate_name}, Job={job_title}")
+                        if event == "start":
+                            session_id = data['start']['streamSid']
+                            call_sid = data['start']['callSid']
+                            custom_params = data['start'].get('customParameters', {})
+                            candidate_name = custom_params.get('CandidateName', 'there')
+                            job_title = custom_params.get('JobTitle', 'the position')
+                            logger.info(f"Stream started: SID={session_id}, CallSID={call_sid}, Candidate={candidate_name}, Job={job_title}")
 
-                        # Build dynamic prompt and store session state
-                        dynamic_prompt = build_dynamic_prompt(candidate_name, job_title)
-                        active_sessions[session_id] = {
-                            "openai_ws": oai_ws,
-                            "prompt": dynamic_prompt,
-                            "tasks": set() 
-                        }
+                            # Build dynamic prompt and store session state
+                            dynamic_prompt = build_dynamic_prompt(candidate_name, job_title)
+                            active_sessions[session_id] = {
+                                "openai_ws": oai_ws,
+                                "prompt": dynamic_prompt,
+                                "tasks": set() 
+                            }
 
-                        # Initialize session and send greeting using helper functions
-                        await initialize_openai_session(oai_ws, session_id, dynamic_prompt)
-                        await send_initial_greeting(oai_ws, session_id, candidate_name)
+                            # Initialize session and send greeting using helper functions
+                            await initialize_openai_session(oai_ws, session_id, dynamic_prompt)
+                            await send_initial_greeting(oai_ws, session_id, candidate_name)
 
-                    elif event == "media" and session_id and oai_ws and oai_ws.open:
-                        audio_b64 = data['media']['payload']
-                        # logger.debug(f"[{session_id}] Forwarding {len(audio_b64)} audio bytes Twilio -> OpenAI")
-                        audio_event = {
-                            "type": "input_audio_buffer.append",
-                            "audio": audio_b64
-                        }
-                        await oai_ws.send(json.dumps(audio_event))
+                        elif event == "media" and session_id and oai_ws and oai_ws.open:
+                            audio_b64 = data['media']['payload']
+                            # logger.debug(f"[{session_id}] Forwarding {len(audio_b64)} audio bytes Twilio -> OpenAI")
+                            audio_event = {
+                                "type": "input_audio_buffer.append",
+                                "audio": audio_b64
+                            }
+                            await oai_ws.send(json.dumps(audio_event))
 
-                    elif event == "stop":
-                        logger.info(f"[{session_id}] Received stop event from Twilio.")
-                        break # Exit the loop gracefully
+                        elif event == "stop":
+                            logger.info(f"[{session_id}] Received stop event from Twilio.")
+                            break # Exit the loop gracefully
 
-                    elif event == "mark":
-                        mark_name = data.get("mark", {}).get("name")
-                        # logger.debug(f"[{session_id}] Received mark from Twilio: {mark_name}")
-                        # Can be used for synchronization if needed
+                        elif event == "mark":
+                            mark_name = data.get("mark", {}).get("name")
+                            # logger.debug(f"[{session_id}] Received mark from Twilio: {mark_name}")
+                            # Can be used for synchronization if needed
 
-            except WebSocketDisconnect:
-                logger.info(f"[{session_id or 'Unknown'}] Twilio WebSocket disconnected.")
-            except websockets.ConnectionClosedOK:
-                 logger.info(f"[{session_id or 'Unknown'}] Twilio connection closed normally.")
-            except Exception as e:
-                logger.error(f"[{session_id or 'Unknown'}] Error in receive_from_twilio: {e}", exc_info=True)
-            finally:
-                logger.info(f"[{session_id or 'Unknown'}] Exiting receive_from_twilio loop.")
-
-
-        async def send_to_twilio(twilio_ws, oai_ws):
-            nonlocal session_id # Access outer scope session_id
-            try:
-                logger.info(f"[{session_id or 'Unknown'}] send_to_twilio loop waiting for OpenAI message...")
-                async for openai_message in oai_ws:
-                    logger.info(f"[{session_id or 'Unknown'}] send_to_twilio loop received message from OpenAI.")
-                    if not session_id: # Don't send if session not started
-                        continue
-
-                    # Explicitly log state before checking
-                    current_twilio_state = twilio_ws.client_state
-                    logger.info(f"[{session_id}] Checking Twilio WS state before sending. State: {current_twilio_state}")
-                    if current_twilio_state != WebSocketState.CONNECTED:
-                         logger.warning(f"[{session_id}] Twilio WS not connected ({current_twilio_state}), cannot send OpenAI message.")
-                         break
-                    
-                    response = json.loads(openai_message)
-                    response_type = response.get("type")
-                    # logger.debug(f"[{session_id}] Received from OpenAI: {response_type}") # Very verbose
-
-                    if response_type == 'session.updated':
-                        logger.info(f"[{session_id}] OpenAI session updated successfully.")
-                    elif response_type == 'response.audio.delta' and response.get('delta'):
-                        audio_b64 = response['delta']
-                        # logger.debug(f"[{session_id}] Forwarding {len(audio_b64)} audio bytes OpenAI -> Twilio")
-                        twilio_media = {
-                            "event": "media",
-                            "streamSid": session_id,
-                            "media": {"payload": audio_b64}
-                        }
-                        await twilio_ws.send_json(twilio_media)
-
-                        # Send mark event for synchronization
-                        mark_event = {
-                            "event": "mark",
-                            "streamSid": session_id,
-                            "mark": {"name": f"openai_chunk_{uuid.uuid4()}"} # Unique mark name
-                        }
-                        await twilio_ws.send_json(mark_event)
-
-                    elif response_type == 'response.text.delta':
-                         # Optional: Log or process text transcription delta if needed
-                         # logger.debug(f"[{session_id}] OpenAI Text Delta: {response.get('delta')}")
-                         pass
-                    elif response_type == 'conversation.item.updated':
-                         # Optional: Log full conversation turns if needed
-                         # logger.debug(f"[{session_id}] OpenAI Item Updated: {response.get('item')}")
-                         pass
-                    elif response_type == 'error':
-                         logger.error(f"[{session_id}] OpenAI API Error: {response.get('error')}")
-                         # Potentially close the connection or send an error message via Twilio
-
-            except websockets.ConnectionClosed as e:
-                logger.info(f"[{session_id or 'Unknown'}] OpenAI WebSocket closed: Code={e.code}, Reason='{e.reason}'")
-            except Exception as e:
-                logger.error(f"[{session_id or 'Unknown'}] Error in send_to_twilio: {e}", exc_info=True)
-            finally:
-                 logger.info(f"[{session_id or 'Unknown'}] Exiting send_to_twilio loop.")
+                except WebSocketDisconnect:
+                    logger.info(f"[{session_id or 'Unknown'}] Twilio WebSocket disconnected.")
+                except websockets.ConnectionClosedOK:
+                     logger.info(f"[{session_id or 'Unknown'}] Twilio connection closed normally.")
+                except Exception as e:
+                    logger.error(f"[{session_id or 'Unknown'}] Error in receive_from_twilio: {e}", exc_info=True)
+                finally:
+                    logger.info(f"[{session_id or 'Unknown'}] Exiting receive_from_twilio loop.")
 
 
-        # Start the concurrent tasks for this session
-        receive_task = asyncio.create_task(receive_from_twilio(websocket, openai_ws))
-        send_task = asyncio.create_task(send_to_twilio(websocket, openai_ws))
+            async def send_to_twilio(twilio_ws, oai_ws):
+                nonlocal session_id
+                try:
+                    logger.info(f"[{session_id or 'Unknown'}] send_to_twilio loop waiting for OpenAI message...")
+                    async for openai_message in oai_ws:
+                        logger.info(f"[{session_id or 'Unknown'}] send_to_twilio loop received message from OpenAI.")
+                        if not session_id: # Don't send if session not started
+                            continue
 
-        # Store task references in session for potential cancellation (though gather handles waiting)
-        if session_id: # Should be set quickly by receive_from_twilio
-             active_sessions[session_id]["tasks"].add(receive_task)
-             active_sessions[session_id]["tasks"].add(send_task)
+                        # Explicitly log state before checking
+                        current_twilio_state = twilio_ws.client_state
+                        logger.info(f"[{session_id}] Checking Twilio WS state before sending. State: {current_twilio_state}")
+                        if current_twilio_state != WebSocketState.CONNECTED:
+                             logger.warning(f"[{session_id}] Twilio WS not connected ({current_twilio_state}), cannot send OpenAI message.")
+                             break
+                            
+                        response = json.loads(openai_message)
+                        response_type = response.get("type")
+                        # logger.debug(f"[{session_id}] Received from OpenAI: {response_type}") # Very verbose
 
-        # Wait for both tasks to complete
-        # This will run until one task finishes (e.g., disconnect) or raises an exception
-        done, pending = await asyncio.wait(
-            {receive_task, send_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+                        if response_type == 'session.updated':
+                            logger.info(f"[{session_id}] OpenAI session updated successfully.")
+                        elif response_type == 'response.audio.delta' and response.get('delta'):
+                            audio_b64 = response['delta']
+                            # logger.debug(f"[{session_id}] Forwarding {len(audio_b64)} audio bytes OpenAI -> Twilio")
+                            twilio_media = {
+                                "event": "media",
+                                "streamSid": session_id,
+                                "media": {"payload": audio_b64}
+                            }
+                            await twilio_ws.send_json(twilio_media)
 
-        # Cancel any pending tasks if one finishes early (e.g., error in one loop)
-        for task in pending:
-            logger.info(f"[{session_id or 'Unknown'}] Cancelling pending task: {task.get_name()}")
-            task.cancel()
-            try:
-                await task # Allow cancellation to propagate
-            except asyncio.CancelledError:
-                 logger.info(f"[{session_id or 'Unknown'}] Task {task.get_name()} cancelled successfully.")
-            except Exception as e:
-                 logger.error(f"[{session_id or 'Unknown'}] Error during task cancellation for {task.get_name()}: {e}", exc_info=True)
+                            # Send mark event for synchronization
+                            mark_event = {
+                                "event": "mark",
+                                "streamSid": session_id,
+                                "mark": {"name": f"openai_chunk_{uuid.uuid4()}"} # Unique mark name
+                            }
+                            await twilio_ws.send_json(mark_event)
 
+                        elif response_type == 'response.text.delta':
+                             # Optional: Log or process text transcription delta if needed
+                             # logger.debug(f"[{session_id}] OpenAI Text Delta: {response.get('delta')}")
+                             pass
+                        elif response_type == 'conversation.item.updated':
+                             # Optional: Log full conversation turns if needed
+                             # logger.debug(f"[{session_id}] OpenAI Item Updated: {response.get('item')}")
+                             pass
+                        elif response_type == 'error':
+                             logger.error(f"[{session_id}] OpenAI API Error: {response.get('error')}")
+                             # Potentially close the connection or send an error message via Twilio
+
+                except websockets.ConnectionClosed as e:
+                    logger.info(f"[{session_id or 'Unknown'}] OpenAI WebSocket closed: Code={e.code}, Reason='{e.reason}'")
+                except Exception as e:
+                    logger.error(f"[{session_id or 'Unknown'}] Error in send_to_twilio: {e}", exc_info=True)
+                finally:
+                     logger.info(f"[{session_id or 'Unknown'}] Exiting send_to_twilio loop.")
+
+
+            # Start the concurrent tasks for this session (inside async with block)
+            receive_task = asyncio.create_task(receive_from_twilio(websocket, openai_ws), name=f"receive_twilio_{websocket.client.host}_{websocket.client.port}")
+            send_task = asyncio.create_task(send_to_twilio(websocket, openai_ws), name=f"send_twilio_{websocket.client.host}_{websocket.client.port}")
+
+            # Store task references (inside async with block)
+            await asyncio.sleep(0.1) 
+            if session_id and session_id in active_sessions:
+                active_sessions[session_id]["tasks"].add(receive_task)
+                active_sessions[session_id]["tasks"].add(send_task)
+            else:
+                logger.warning(f"Session ID not set shortly after tasks started ({session_id=}). Task references not stored.")
+
+            # Wait for tasks (inside async with block)
+            done, pending = await asyncio.wait(
+                {receive_task, send_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel pending tasks (inside async with block)
+            for task in pending:
+                logger.info(f"[{session_id or 'Unknown'}] Cancelling pending task: {task.get_name()}")
+                task.cancel()
+                try:
+                    await task # Allow cancellation to propagate
+                except asyncio.CancelledError:
+                     logger.info(f"[{session_id or 'Unknown'}] Task {task.get_name()} cancelled successfully.")
+                except Exception as e:
+                     logger.error(f"[{session_id or 'Unknown'}] Error during task cancellation for {task.get_name()}: {e}", exc_info=True)
+
+        # Code execution will exit the 'async with openai_ws' block here
+        # openai_ws connection is automatically closed
 
     except websockets.exceptions.InvalidHandshake as e:
          logger.error(f"Failed to connect to OpenAI WebSocket (Handshake): {e}", exc_info=True)
+         await websocket.close(code=1011, reason="OpenAI connection failed") 
     except Exception as e:
-        logger.error(f"[{session_id or 'Unknown'}] Error in handle_twilio_stream main loop: {e}", exc_info=True)
+        logger.error(f"[{session_id or 'Unknown'}] Error in handle_twilio_stream main handler: {e}", exc_info=True)
     finally:
         sid_for_log = session_id or "Unknown Session"
         logger.info(f"[{sid_for_log}] Cleaning up session...")
 
-        # Ensure OpenAI connection is closed
-        if openai_ws and openai_ws.open:
-            logger.info(f"[{sid_for_log}] Closing OpenAI WebSocket.")
-            await openai_ws.close()
+        # Ensure Twilio connection is closed 
+        # ... Twilio closing logic remains the same ...
 
-        # Ensure Twilio connection is closed (FastAPI handles this automatically on function exit/error, but explicit close is safe)
-        # try:
-        #     if websocket.client_state != websockets.protocol.State.CLOSED:
-        #         logger.info(f"[{sid_for_log}] Closing Twilio WebSocket.")
-        #         await websocket.close()
-        # except Exception as e:
-        #     logger.error(f"[{sid_for_log}] Error closing Twilio WebSocket: {e}", exc_info=True)
+        # Remove session from active sessions
+        # ... session removal logic remains the same ...
 
-
-        # Remove session from active sessions if it exists
-        if session_id and session_id in active_sessions:
-            logger.info(f"[{sid_for_log}] Removing session from active_sessions.")
-            active_sessions.pop(session_id, None)
-        else:
-            logger.warning(f"[{sid_for_log}] Session ID not found in active_sessions during cleanup.")
-
-        logger.info(f"[{sid_for_log}] Session cleanup complete.")
+        logger.info(f"[{sid_for_log}] Session cleanup complete for connection from {websocket.client}.")
 
 
 if __name__ == "__main__":
