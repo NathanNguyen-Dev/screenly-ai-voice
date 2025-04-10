@@ -158,7 +158,7 @@ async def generate_outbound_twiml(request: Request, candidate_id: uuid.UUID):
 @app.post("/make-call")
 async def make_outbound_call(call_request: MakeCallRequest): # Accept request body
     candidate_id = call_request.candidate_id
-    print(f"Attempting to make call to candidate_id: {candidate_id}")
+    logger.info(f"Attempting to make call to candidate_id: {candidate_id}") # Use logger
     try:
         # ✅ Step 1: Retrieve the specified candidate record from Supabase.
         response = supabase.table("candidates")\
@@ -170,32 +170,33 @@ async def make_outbound_call(call_request: MakeCallRequest): # Accept request bo
         # Check if a candidate record was found.
         candidate = response.data[0] if response.data else None
         if not candidate:
-            print(f"Candidate with ID {candidate_id} not found in Supabase.")
+            logger.error(f"Candidate {candidate_id} not found in Supabase.")
             return JSONResponse({"error": f"Candidate with ID {candidate_id} not found"}, status_code=404)
 
         # Extract the candidate's phone number (ID is already known)
         phone_number = candidate["phone_number"]
         if not phone_number:
-            print(f"Candidate {candidate_id} found but has no phone number.")
+            logger.error(f"Candidate {candidate_id} found but has no phone number.")
             return JSONResponse({"error": f"Candidate {candidate_id} has no phone number"}, status_code=400)
 
-        # ✅ Step 2: Use Twilio to initiate an outbound call to the candidate's phone number.
-        twilio_callback_url = f"{PUBLIC_SERVER_URL}/incoming-call"
-        print(f"Setting Twilio callback URL to: {twilio_callback_url}")
+        # ✅ Step 2: Use Twilio to initiate call using the TwiML generation endpoint
+        twilio_twiml_url = f"{PUBLIC_SERVER_URL}/generate-outbound-twiml/{candidate_id}"
+        logger.info(f"Initiating Twilio call to {phone_number} using TwiML URL: {twilio_twiml_url}") # Correct URL log
+        # TODO: Add status_callback handling if needed to track call progress externally
         call = client.calls.create(
             to=phone_number,
             from_=TWILIO_PHONE_NUMBER,
-            url=twilio_callback_url
+            url=twilio_twiml_url # Corrected: Use the TwiML generation URL
         )
 
-        # ✅ Step 3: Log the call in the call_logs table in Supabase.
-        # Use the provided candidate_id
+        # ✅ Step 3: Log the call attempt (status starts as 'initiated')
+        # Log using the correct 'call_sid' column name
         supabase.table("call_logs").insert({
             "id": str(uuid.uuid4()),
-            "candidate_id": str(candidate_id), # Use the provided ID
+            "candidate_id": str(candidate_id),
             "status": "initiated",
             "started_at": datetime.now().isoformat(),
-            "twilio_call_sid": call.sid
+            "call_sid": call.sid # Corrected: Use 'call_sid' as the column name key
         }).execute()
 
         # ✅ Step 4: Return a JSON response confirming the call and showing key details.
@@ -206,7 +207,7 @@ async def make_outbound_call(call_request: MakeCallRequest): # Accept request bo
         })
 
     except Exception as e:
-        print(f"Error during make_outbound_call for candidate {candidate_id}: {e}")
+        logger.error(f"Error during make_outbound_call for candidate {candidate_id}: {e}")
         # ❌ If any errors occur, catch them and return a clean error message.
         return JSONResponse({"error": str(e)}, status_code=500)
 
