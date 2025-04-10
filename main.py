@@ -274,22 +274,6 @@ async def handle_twilio_stream(websocket: WebSocket):
                         await oai_ws.send(json.dumps(session_update))
                         logger.info(f"[{session_id}] Successfully sent session update to OpenAI.")
 
-                        # --- ADDED: Send initial greeting message from AI --- 
-                        initial_greeting_text = f"Hello {candidate_name}, I am Screenly, your AI interviewer. Great to connect with you!"
-                        initial_message = {
-                            "type": "conversation.item.create",
-                            "item": {
-                                "type": "message",
-                                "message": {
-                                    "role": "assistant",
-                                    "text": initial_greeting_text
-                                }
-                            }
-                        }
-                        logger.info(f"[{session_id}] Sending initial assistant greeting to OpenAI.")
-                        await oai_ws.send(json.dumps(initial_message))
-                        # --- END ADDED --- 
-
                     elif event == "media" and session_id and oai_ws and oai_ws.open:
                         audio_b64 = data['media']['payload']
                         # logger.debug(f"[{session_id}] Forwarding {len(audio_b64)} audio bytes Twilio -> OpenAI")
