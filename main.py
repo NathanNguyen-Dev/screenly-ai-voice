@@ -210,6 +210,49 @@ async def make_outbound_call(call_request: MakeCallRequest): # Accept request bo
         # ❌ If any errors occur, catch them and return a clean error message.
         return JSONResponse({"error": str(e)}, status_code=500)
 
+async def initialize_openai_session(openai_ws, session_id: str, dynamic_prompt: str):
+    """Sends the session.update message to configure the OpenAI session."""
+    session_update = {
+        "type": "session.update",
+        "session": {
+            "turn_detection": {"type": "server_vad", "silence_duration_ms": 300},
+            "input_audio_format": "g711_ulaw",
+            "output_audio_format": "g711_ulaw",
+            "voice": VOICE,
+            "instructions": dynamic_prompt, 
+            "modalities": ["text", "audio"],
+            "temperature": 0.7, # Adjusted from example to keep previous value
+        }
+    }
+    logger.info(f"[{session_id}] Preparing to send session update to OpenAI.")
+    await openai_ws.send(json.dumps(session_update))
+    logger.info(f"[{session_id}] Successfully sent session update to OpenAI.")
+
+async def send_initial_greeting(openai_ws, session_id: str, candidate_name: str):
+    """Sends the initial greeting item and triggers the response generation."""
+    initial_greeting_text = f"Hello {candidate_name}, I am Screenly, your AI interviewer. Great to connect with you!"
+    # Step 1: Create the conversation item (using role: user as per guide)
+    initial_message = {
+        "type": "conversation.item.create",
+        "item": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": initial_greeting_text
+                }
+            ]
+        }
+    }
+    logger.info(f"[{session_id}] Sending initial greeting item to OpenAI.")
+    await openai_ws.send(json.dumps(initial_message))
+
+    # Step 2: Trigger the response generation
+    trigger_response = {"type": "response.create"}
+    logger.info(f"[{session_id}] Sending response.create trigger to OpenAI.")
+    await openai_ws.send(json.dumps(trigger_response))
+
 @app.websocket("/twilio-stream") # Renamed from /media-stream
 async def handle_twilio_stream(websocket: WebSocket):
     """Handles a single Twilio Media Stream connection."""
@@ -248,55 +291,17 @@ async def handle_twilio_stream(websocket: WebSocket):
                         job_title = custom_params.get('JobTitle', 'the position')
                         logger.info(f"Stream started: SID={session_id}, CallSID={call_sid}, Candidate={candidate_name}, Job={job_title}")
 
-                        # Build and store session state
+                        # Build dynamic prompt and store session state
                         dynamic_prompt = build_dynamic_prompt(candidate_name, job_title)
                         active_sessions[session_id] = {
                             "openai_ws": oai_ws,
                             "prompt": dynamic_prompt,
-                            "tasks": set() # To hold refs to asyncio tasks
+                            "tasks": set() 
                         }
 
-                        # Send initial configuration to OpenAI
-                        session_update = {
-                            "type": "session.update",
-                            "session": {
-                                "turn_detection": {"type": "server_vad", "silence_duration_ms": 300},
-                                "input_audio_format": "g711_ulaw",
-                                "output_audio_format": "g711_ulaw",
-                                "voice": VOICE,
-                                "instructions": dynamic_prompt,
-                                "modalities": ["text", "audio"],
-                                "temperature": 0.7,
-                            }
-                        }
-                        logger.info(f"[{session_id}] Preparing to send session update to OpenAI.")
-                        await oai_ws.send(json.dumps(session_update))
-                        logger.info(f"[{session_id}] Successfully sent session update to OpenAI.")
-
-                        # --- Send initial greeting using the pattern from Twilio guide --- 
-                        initial_greeting_text = f"Hello {candidate_name}, I am Screenly, your AI interviewer. Great to connect with you!"
-                        # Step 1: Create the conversation item (using role: user as per guide)
-                        initial_message = {
-                            "type": "conversation.item.create",
-                            "item": {
-                                "type": "message",
-                                "role": "user", # Using 'user' role as per Twilio example
-                                "content": [
-                                    {
-                                        "type": "input_text",
-                                        "text": initial_greeting_text
-                                    }
-                                ]
-                            }
-                        }
-                        logger.info(f"[{session_id}] Sending initial greeting item to OpenAI.")
-                        await oai_ws.send(json.dumps(initial_message))
-
-                        # Step 2: Trigger the response generation
-                        trigger_response = {"type": "response.create"}
-                        logger.info(f"[{session_id}] Sending response.create trigger to OpenAI.")
-                        await oai_ws.send(json.dumps(trigger_response))
-                        # --- End initial greeting --- 
+                        # Initialize session and send greeting using helper functions
+                        await initialize_openai_session(oai_ws, session_id, dynamic_prompt)
+                        await send_initial_greeting(oai_ws, session_id, candidate_name)
 
                     elif event == "media" and session_id and oai_ws and oai_ws.open:
                         audio_b64 = data['media']['payload']
