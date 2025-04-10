@@ -37,16 +37,15 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 PUBLIC_SERVER_URL = os.getenv('PUBLIC_SERVER_URL')
 PORT = int(os.getenv('PORT', 8080))
 # Base system message - will be formatted per candidate/job
+# Note: The initial greeting is now handled separately by an explicit message.
 BASE_SYSTEM_MESSAGE = (
-    "Hey {candidate_name}, I'm your AI interviewer—great to connect with you! "
-    "We're discussing the {job_title} role today. "
-    "Before we dive into details, how's your day been so far? Feel free to take a moment to gather your thoughts. "
-    "Here's our plan: "
-    "First, tell me your story—what inspired you to pursue this field and get into this role? "
-    "Next, share the skills and experiences you bring to our team. Take your time. "
-    "Finally, let's talk about what excites you most about this position opportunity. "
-    "I'll follow up on your answers, ensuring we stay focused on the position. If you stray off-topic, I'll prompt you with, 'Nice, how does that relate to the position?' "
-    "Remember to speak slowly and clearly—I'm here to make this a comfortable and engaging conversation. Let's get started!"
+    "My instructions after delivering my initial greeting are: " # Clarify timing
+    "Proceed with the interview plan for the {job_title} role: "
+    "First, ask the candidate to tell their story—what inspired them to pursue this field and get into this role? "
+    "Next, ask them to share the skills and experiences they bring to the team for the {job_title} role. Remind them to take their time. "
+    "Finally, ask them what excites them most about this {job_title} position opportunity. "
+    "Follow up on their answers naturally, ensuring the conversation stays focused on the position. If they stray off-topic, gently guide them back by asking, 'That's interesting, how does that relate to the {job_title} position?' "
+    "Maintain a friendly and engaging tone. Remember to speak slowly and clearly."
 )
 VOICE = 'coral'
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -273,6 +272,22 @@ async def handle_twilio_stream(websocket: WebSocket):
                         logger.info(f"[{session_id}] Preparing to send session update to OpenAI.")
                         await oai_ws.send(json.dumps(session_update))
                         logger.info(f"[{session_id}] Successfully sent session update to OpenAI.")
+
+                        # --- RE-ADDED: Send initial greeting message from AI --- 
+                        initial_greeting_text = f"Hello {candidate_name}, I am Screenly, your AI interviewer. Great to connect with you!"
+                        initial_message = {
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "message",  # Corrected structure
+                                "message": {         
+                                    "role": "assistant", 
+                                    "text": initial_greeting_text
+                                }
+                            }
+                        }
+                        logger.info(f"[{session_id}] Sending initial assistant greeting to OpenAI.")
+                        await oai_ws.send(json.dumps(initial_message))
+                        # --- END RE-ADDED --- 
 
                     elif event == "media" and session_id and oai_ws and oai_ws.open:
                         audio_b64 = data['media']['payload']
