@@ -231,12 +231,12 @@ async def initialize_openai_session(openai_ws, session_id: str, dynamic_prompt: 
 async def send_initial_greeting(openai_ws, session_id: str, candidate_name: str):
     """Sends the initial greeting item and triggers the response generation."""
     initial_greeting_text = f"Hello {candidate_name}, I am Screenly, your AI interviewer. Great to connect with you!"
-    # Step 1: Create the conversation item (using role: user as per guide)
+    # Step 1: Create the conversation item
     initial_message = {
         "type": "conversation.item.create",
         "item": {
             "type": "message",
-            "role": "user",
+            "role": "assistant",
             "content": [
                 {
                     "type": "input_text",
@@ -245,7 +245,7 @@ async def send_initial_greeting(openai_ws, session_id: str, candidate_name: str)
             ]
         }
     }
-    logger.info(f"[{session_id}] Sending initial greeting item to OpenAI.")
+    logger.info(f"[{session_id}] Sending initial ASSISTANT greeting item to OpenAI.")
     await openai_ws.send(json.dumps(initial_message))
 
     # Step 2: Trigger the response generation
