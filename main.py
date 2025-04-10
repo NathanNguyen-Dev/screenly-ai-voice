@@ -270,9 +270,10 @@ async def handle_twilio_stream(websocket: WebSocket):
                                 "temperature": 0.7,
                             }
                         }
-                        logger.info(f"[{session_id}] Sending session update to OpenAI.")
-                        # logger.debug(f"[{session_id}] OpenAI session update details: {json.dumps(session_update)}")
+                        logger.info(f"[{session_id}] Preparing to send session update to OpenAI.") # Log point 1
                         await oai_ws.send(json.dumps(session_update))
+                        logger.info(f"[{session_id}] Successfully sent session update to OpenAI.") # Log point 2
+                        # logger.debug(f"[{session_id}] OpenAI session update details: {json.dumps(session_update)}") # Keep commented unless needed
 
                     elif event == "media" and session_id and oai_ws and oai_ws.open:
                         audio_b64 = data['media']['payload']
@@ -305,13 +306,18 @@ async def handle_twilio_stream(websocket: WebSocket):
         async def send_to_twilio(twilio_ws, oai_ws):
             nonlocal session_id # Access outer scope session_id
             try:
+                logger.info(f"[{session_id or 'Unknown'}] send_to_twilio loop waiting for OpenAI message...") # Log point 3a
                 async for openai_message in oai_ws:
+                    logger.info(f"[{session_id or 'Unknown'}] send_to_twilio loop received message from OpenAI.") # Log point 3b
                     if not session_id: # Don't send if session not started
                         # logger.debug("OpenAI message received before session start, discarding.")
                         continue
 
-                    if not twilio_ws or twilio_ws.client_state != websockets.protocol.State.OPEN:
-                         logger.warning(f"[{session_id}] Twilio WS closed, cannot send OpenAI message.")
+                    # Explicitly log state before checking
+                    current_twilio_state = twilio_ws.client_state
+                    logger.info(f"[{session_id}] Checking Twilio WS state before sending. State: {current_twilio_state}") # Log point 4
+                    if current_twilio_state != websockets.protocol.State.OPEN:
+                         logger.warning(f"[{session_id}] Twilio WS closed ({current_twilio_state}), cannot send OpenAI message.")
                          break
 
                     response = json.loads(openai_message)
