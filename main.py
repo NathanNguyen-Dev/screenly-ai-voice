@@ -273,21 +273,30 @@ async def handle_twilio_stream(websocket: WebSocket):
                         await oai_ws.send(json.dumps(session_update))
                         logger.info(f"[{session_id}] Successfully sent session update to OpenAI.")
 
-                        # --- RE-ADDED: Send initial greeting message from AI --- 
+                        # --- Send initial greeting using the pattern from Twilio guide --- 
                         initial_greeting_text = f"Hello {candidate_name}, I am Screenly, your AI interviewer. Great to connect with you!"
+                        # Step 1: Create the conversation item (using role: user as per guide)
                         initial_message = {
                             "type": "conversation.item.create",
                             "item": {
-                                "type": "message",  # Corrected structure
-                                "message": {         
-                                    "role": "assistant", 
-                                    "text": initial_greeting_text
-                                }
+                                "type": "message",
+                                "role": "user", # Using 'user' role as per Twilio example
+                                "content": [
+                                    {
+                                        "type": "input_text",
+                                        "text": initial_greeting_text
+                                    }
+                                ]
                             }
                         }
-                        logger.info(f"[{session_id}] Sending initial assistant greeting to OpenAI.")
+                        logger.info(f"[{session_id}] Sending initial greeting item to OpenAI.")
                         await oai_ws.send(json.dumps(initial_message))
-                        # --- END RE-ADDED --- 
+
+                        # Step 2: Trigger the response generation
+                        trigger_response = {"type": "response.create"}
+                        logger.info(f"[{session_id}] Sending response.create trigger to OpenAI.")
+                        await oai_ws.send(json.dumps(trigger_response))
+                        # --- End initial greeting --- 
 
                     elif event == "media" and session_id and oai_ws and oai_ws.open:
                         audio_b64 = data['media']['payload']
