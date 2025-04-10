@@ -189,14 +189,14 @@ async def make_outbound_call(call_request: MakeCallRequest): # Accept request bo
             url=twilio_twiml_url # Corrected: Use the TwiML generation URL
         )
 
-        # ✅ Step 3: Log the call attempt (status starts as 'initiated')
-        # Log using the correct 'call_sid' column name
+        # ✅ Step 3: Log the call attempt (status starts as 'pending')
+        # Log using the correct 'call_sid' column name and an allowed status
         supabase.table("call_logs").insert({
             "id": str(uuid.uuid4()),
             "candidate_id": str(candidate_id),
-            "status": "initiated",
+            "status": "pending", # Reverted: Use 'pending' status to satisfy constraint
             "started_at": datetime.now().isoformat(),
-            "call_sid": call.sid # Corrected: Use 'call_sid' as the column name key
+            "call_sid": call.sid
         }).execute()
 
         # ✅ Step 4: Return a JSON response confirming the call and showing key details.
