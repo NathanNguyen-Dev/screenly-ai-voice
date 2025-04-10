@@ -8,7 +8,7 @@ import asyncio
 import websockets
 from fastapi import FastAPI, WebSocket, Request, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.websockets import WebSocketDisconnect
+from fastapi.websockets import WebSocketDisconnect, WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
 from twilio.twiml.voice_response import VoiceResponse, Connect, Parameter
 from twilio.rest import Client
@@ -306,20 +306,19 @@ async def handle_twilio_stream(websocket: WebSocket):
         async def send_to_twilio(twilio_ws, oai_ws):
             nonlocal session_id # Access outer scope session_id
             try:
-                logger.info(f"[{session_id or 'Unknown'}] send_to_twilio loop waiting for OpenAI message...") # Log point 3a
+                logger.info(f"[{session_id or 'Unknown'}] send_to_twilio loop waiting for OpenAI message...")
                 async for openai_message in oai_ws:
-                    logger.info(f"[{session_id or 'Unknown'}] send_to_twilio loop received message from OpenAI.") # Log point 3b
+                    logger.info(f"[{session_id or 'Unknown'}] send_to_twilio loop received message from OpenAI.")
                     if not session_id: # Don't send if session not started
-                        # logger.debug("OpenAI message received before session start, discarding.")
                         continue
 
                     # Explicitly log state before checking
                     current_twilio_state = twilio_ws.client_state
-                    logger.info(f"[{session_id}] Checking Twilio WS state before sending. State: {current_twilio_state}") # Log point 4
-                    if current_twilio_state != websockets.protocol.State.OPEN:
-                         logger.warning(f"[{session_id}] Twilio WS closed ({current_twilio_state}), cannot send OpenAI message.")
+                    logger.info(f"[{session_id}] Checking Twilio WS state before sending. State: {current_twilio_state}")
+                    if current_twilio_state != WebSocketState.CONNECTED:
+                         logger.warning(f"[{session_id}] Twilio WS not connected ({current_twilio_state}), cannot send OpenAI message.")
                          break
-
+                    
                     response = json.loads(openai_message)
                     response_type = response.get("type")
                     # logger.debug(f"[{session_id}] Received from OpenAI: {response_type}") # Very verbose
