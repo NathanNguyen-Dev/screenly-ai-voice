@@ -230,7 +230,7 @@ async def initialize_openai_session(openai_ws, session_id: str, dynamic_prompt: 
 
 async def send_initial_greeting(openai_ws, session_id: str, candidate_name: str):
     """Sends the initial greeting item and triggers the response generation."""
-    initial_greeting_text = f"Hello {candidate_name}, I am Screenly, your AI interviewer. Great to connect with you!"
+    initial_greeting_text = f"Hello I am {candidate_name}, great to be getting a call from you. Can you say hello and introduce yourself"
     # Step 1: Create the conversation item
     initial_message = {
         "type": "conversation.item.create",
